@@ -1,8 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const jwt = require("jsonwebtoken");
-
 const sendVerificationCode = require("../utils/smsSender");
+const User = require("../models/User");
+const { auth } = require("../middlewares/auth");
 
 const tempCodes = {};
 
@@ -20,9 +21,13 @@ router.post("/send-code", async (req, res) => {
 
     tempCodes[phone] = code;
 
-    await sendVerificationCode(phone, code);
-
-    res.json({ message: "Verification code sent" });
+    try {
+        await sendVerificationCode(phone, code);
+        res.json({ message: "Verification code sent" });
+    } catch (err) {
+        console.error("Error sending code:", err);
+        res.status(500).json({ message: "Failed to send code" });
+    }
 });
 
 router.post("/verify-code", async (req, res) => {
@@ -38,24 +43,39 @@ router.post("/verify-code", async (req, res) => {
 
     delete tempCodes[phone];
 
-    const User = require("../models/User");
-    let user = await User.findOne({ phone });
+    try {
+        let user = await User.findOne({ phone });
 
-    if (!user) {
-        user = new User({ phone, role: "user" });
-        await user.save();
+        if (!user) {
+            user = new User({ phone, role: "user", isVerified: true });
+            await user.save();
+        } else if (!user.isVerified) {
+            user.isVerified = true;
+            await user.save();
+        }
+
+        const token = jwt.sign(
+            { id: user._id, phone: user.phone, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+
+        res.cookie("token", token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict",
+            maxAge: 7 * 24 * 60 * 60 * 1000
+        });
+
+        res.json({ message: "Login successful", user });
+    } catch (err) {
+        console.error("Verification error:", err);
+        res.status(500).json({ message: "Internal server error" });
     }
-    user.isVerified = true;
-    await user.save();
-
-    const token = jwt.sign(
-        { id: user._id, phone: user.phone, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" }
-    );
-
-    res.json({ token, user });
 });
 
+router.get("/me", auth, (req, res) => {
+    res.json({ user: req.user });
+});
 
 module.exports = router;
